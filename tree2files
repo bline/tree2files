@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+import os
+import re
+import argparse
+
+def parse_tree_structure(file_path, strip_root=False):
+    """
+    Reads a tree-formatted file and creates the corresponding directories and files.
+    The very first non-empty line is taken as the root. Its children are forced to be level 1.
+    Inline comments (starting with '#' or '//') are removed.
+    
+    If `strip_root` is True, the root folder itself is not created, and its children are generated
+    in the current directory.
+    
+    Existing files and directories are left intact.
+    """
+    with open(file_path, "r") as f:
+        lines = [line.rstrip("\n") for line in f if line.strip() != ""]
+
+    if not lines:
+        print("No content found in the structure file.")
+        return
+
+    # Process the first line as the root.
+    root_line = lines[0]
+    m = re.match(r'^(?:├── |└── )?(?P<name>.*?)(?:\s+(?:#|//).*)?$', root_line)
+    if not m:
+        raise ValueError("Could not parse the root line.")
+    root_name = m.group("name").strip()
+    if not root_name.endswith('/'):
+        root_name += '/'
+
+    if strip_root:
+        base = "."
+        # Push a dummy entry for the base directory at level 0.
+        stack = [(0, base)]
+    else:
+        os.makedirs(root_name, exist_ok=True)
+        base = root_name
+        stack = [(0, base)]
+
+    # Process the remaining lines.
+    # For each subsequent line, if there is no indent, assume it is level 1.
+    for line in lines[1:]:
+        # Capture indent and name; remove inline comments.
+        m = re.match(
+            r'^(?P<indent>(?:[│\s]{4})*)(?:├── |└── )?(?P<name>.*?)(?:\s+(?:#|//).*)?$',
+            line
+        )
+        if not m:
+            continue
+        indent = m.group("indent")
+        name = m.group("name").strip()
+        if not name:
+            continue
+
+        # Determine level: if indent is empty, force it to level 1; else, add 1 to the calculated level.
+        raw_level = len(indent) // 4
+        level = raw_level + 1
+
+        # Pop the stack until we find a parent at a lower level.
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        parent = stack[-1][1] if stack else base
+        current_path = os.path.join(parent, name)
+
+        if name.endswith('/'):
+            os.makedirs(current_path, exist_ok=True)
+            stack.append((level, current_path))
+        else:
+            # Ensure the parent directory exists.
+            dir_path = os.path.dirname(current_path)
+            if dir_path and not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+            # Only create the file if it does not exist.
+            if not os.path.exists(current_path):
+                open(current_path, 'w').close()
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate a project structure from a tree-formatted file."
+    )
+    parser.add_argument("structure_file", help="Path to the file containing the tree structure.")
+    parser.add_argument("--strip-root", action="store_true",
+                        help="Skip the top-level folder, generating files in the current directory.")
+    args = parser.parse_args()
+
+    try:
+        parse_tree_structure(args.structure_file, strip_root=args.strip_root)
+        print("✅ Project structure created! Run `code .` to open in VS Code.")
+    except Exception as e:
+        print(f"❌ An error occurred: {e}")
+
+if __name__ == "__main__":
+    main()
+
