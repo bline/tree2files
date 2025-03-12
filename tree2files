@@ -1,96 +1,197 @@
 #!/usr/bin/env python3
 import os
-import re
 import argparse
+import re
 
-def parse_tree_structure(file_path, strip_root=False):
+class TreeNode:
+    def __init__(self, name, is_dir=False):
+        self.name = name
+        self.is_dir = is_dir
+        self.children = []
+
+    def add_child(self, child_node):
+        self.children.append(child_node)
+
+    def __str__(self, indent=0):
+        """
+        Generates a string representation of the TreeNode and its children, with indentation.
+        """
+        indent_str = '    ' * indent
+        node_str = f"{indent_str}{'d ' if self.is_dir else 'f '}\"{self.name}\"\n"  # 'd' for directory, 'f' for file
+        for child in self.children:
+            node_str += child.__str__(indent + 1)
+        return node_str
+
+
+def _parse_line(line):
     """
-    Reads a tree-formatted file and creates the corresponding directories and files.
-    The very first non-empty line is taken as the root. Its children are forced to be level 1.
-    Inline comments (starting with '#' or '//') are removed.
-    
-    If `strip_root` is True, the root folder itself is not created, and its children are generated
-    in the current directory.
-    
-    Existing files and directories are left intact.
+    Given a raw line from the tree file, remove any comments and extract the
+    indentation level and the node name.
+
+    The regex works as follows:
+      - ^((?:│\s{3}| {4})*) captures zero or more groups of 4 characters that are either "│\xa0\xa0 " or "\xa0\xa0\xa0 "
+      - (?:├── |│── |└── )? optionally matches one branch marker (the first occurrence)
+      - (.*)$ captures the rest of the line as the file/directory name.
+
+    Returns a tuple (level, name), where level is an integer and name is the cleaned name.
     """
-    with open(file_path, "r") as f:
-        lines = [line.rstrip("\n") for line in f if line.strip() != ""]
+    # Remove trailing newline and comments
+    line = line.rstrip('\n')
+    if '#' in line:
+        line = line.split('#')[0]
+    elif '//' in line:
+        line = line.split('//')[0]
 
-    if not lines:
-        print("No content found in the structure file.")
-        return
+    # The regex below:
+    #   - group(1): leading indent groups (each 4 characters: either "│   " or "    ")
+    #   - group(2): optional branch marker ("├── ", "│── ", or "└── ")
+    #   - group(3): the rest (node name)
+    m = re.match(r'^((?:│\s{3}| {4})*)(├── |│── |└── )?(.*)$', line)
+    if m:
+        indent_str = m.group(1)
+        branch = m.group(2)
+        name = m.group(3).strip()
+        # Compute level: one level per 4 characters in indent_str; if a branch marker exists, add one.
+        level = (len(indent_str) // 4) + (1 if branch else 0)
+        return level, name
+    # Fallback: no match means no indentation.
+    return 0, line.strip()
 
-    # Process the first line as the root.
-    root_line = lines[0]
-    m = re.match(r'^(?:├── |└── )?(?P<name>.*?)(?:\s+(?:#|//).*)?$', root_line)
-    if not m:
-        raise ValueError("Could not parse the root line.")
-    root_name = m.group("name").strip()
-    if not root_name.endswith('/'):
-        root_name += '/'
+
+def _parse_lines_recursive(lines, index, current_indentation, parent_node, strip_root):
+    """
+    Recursively parses lines to build the tree structure.
+
+    Args:
+        lines (list): Lines from the input file.
+        index (int): Current line index.
+        current_indentation (int): Expected indentation level at this recursion.
+        parent_node (TreeNode): Parent node to add children.
+        strip_root (bool): If True, uses the first unindented line as the root.
+
+    Returns:
+        int: The next line index to process (when indentation decreases).
+    """
+    line_index = index
+    while line_index < len(lines):
+        original_line = lines[line_index]
+
+        level, name = _parse_line(original_line)
+
+        # Skip empty lines (after stripping)
+        if not name:
+            print("Skipping empty/comment line")
+            line_index += 1
+            continue
+
+        # If the indentation level is less than expected, we’re done at this recursion level.
+        if level < current_indentation:
+            return line_index
+
+        if level == current_indentation:
+            is_dir = False
+            if name.endswith('/'):
+                is_dir = True
+                name = name[:-1]
+            node = TreeNode(name, is_dir)
+            parent_node.add_child(node)
+            line_index += 1
+
+            # Check if the next line is more indented, meaning it’s a child of the current node.
+            if line_index < len(lines):
+                next_level, _ = _parse_line(lines[line_index])
+                if next_level > current_indentation:
+                    line_index = _parse_lines_recursive(lines, line_index, current_indentation + 1, node, strip_root)
+        else:
+            # If the indentation level is greater than expected, something is off.
+            line_index += 1
+
+    return line_index
+
+
+def parse_input_file(input_file, strip_root=False):
+    """
+    Parses the input file and builds a tree structure representing the directory tree.
+
+    Args:
+        input_file (str): Path to the input file.
+        strip_root (bool): If True, uses the first unindented line as the root.
+
+    Returns:
+        TreeNode: The root of the tree structure.
+    """
+    root = TreeNode("root", is_dir=True)  # Dummy root node
+    with open(input_file, 'r') as f:
+        lines = f.readlines()
+    line_index = 0
 
     if strip_root:
-        base = "."
-        # Push a dummy entry for the base directory at level 0.
-        stack = [(0, base)]
+        # Use the first non-indented (level 0) line as the root.
+        while line_index < len(lines):
+            level, name = _parse_line(lines[line_index])
+            if level == 0 and name:
+                is_dir = name.endswith('/')
+                root = TreeNode(name.rstrip('/'), is_dir)
+                print(f"Stripped root set to: {root.name}")
+                _parse_lines_recursive(lines, line_index + 1, 1, root, strip_root)
+                return root
+            line_index += 1
+        return root  # Fallback: empty file or all indented lines.
     else:
-        os.makedirs(root_name, exist_ok=True)
-        base = root_name
-        stack = [(0, base)]
+        _parse_lines_recursive(lines, 0, 0, root, strip_root)
+        return root
 
-    # Process the remaining lines.
-    # For each subsequent line, if there is no indent, assume it is level 1.
-    for line in lines[1:]:
-        # Capture indent and name; remove inline comments.
-        m = re.match(
-            r'^(?P<indent>(?:[│\s]{4})*)(?:├── |└── )?(?P<name>.*?)(?:\s+(?:#|//).*)?$',
-            line
-        )
-        if not m:
-            continue
-        indent = m.group("indent")
-        name = m.group("name").strip()
-        if not name:
-            continue
 
-        # Determine level: if indent is empty, force it to level 1; else, add 1 to the calculated level.
-        raw_level = len(indent) // 4
-        level = raw_level + 1
+def create_filesystem_from_tree(tree_root, base_dir=os.getcwd()):
+    """
+    Creates the directory and file structure on the filesystem based on the tree.
 
-        # Pop the stack until we find a parent at a lower level.
-        while stack and stack[-1][0] >= level:
-            stack.pop()
-        parent = stack[-1][1] if stack else base
-        current_path = os.path.join(parent, name)
+    Args:
+        tree_root (TreeNode): The root of the directory tree.
+        base_dir (str): The base directory where the tree will be created.
+    """
+    if not tree_root or (tree_root.name == "root" and not tree_root.children):
+        return
 
-        if name.endswith('/'):
-            os.makedirs(current_path, exist_ok=True)
-            stack.append((level, current_path))
-        else:
-            # Ensure the parent directory exists.
-            dir_path = os.path.dirname(current_path)
-            if dir_path and not os.path.exists(dir_path):
-                os.makedirs(dir_path, exist_ok=True)
-            # Only create the file if it does not exist.
+    current_path = base_dir
+    if tree_root.name != "root":
+        current_path = os.path.join(current_path, tree_root.name)
+        if tree_root.is_dir:
             if not os.path.exists(current_path):
-                open(current_path, 'w').close()
+                os.makedirs(current_path, exist_ok=True)
+                print(f"Created directory: {current_path}")
+            else:
+                print(f"Directory already exists, skipping: {current_path}")
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate a project structure from a tree-formatted file."
-    )
-    parser.add_argument("structure_file", help="Path to the file containing the tree structure.")
-    parser.add_argument("--strip-root", action="store_true",
-                        help="Skip the top-level folder, generating files in the current directory.")
-    args = parser.parse_args()
+    for child in tree_root.children:
+        node_path = os.path.join(current_path, child.name)
+        if child.is_dir:
+            if not os.path.exists(node_path):
+                os.makedirs(node_path, exist_ok=True)
+                print(f"Created directory: {node_path}")
+            else:
+                print(f"Directory already exists, skipping: {node_path}")
+            create_filesystem_from_tree(child, current_path)
+        else:
+            try:
+                with open(node_path, 'x') as file:
+                    print(f"Created file: {node_path}")
+            except FileExistsError:
+                print(f"File already exists, skipping: {node_path}")
 
-    try:
-        parse_tree_structure(args.structure_file, strip_root=args.strip_root)
-        print("✅ Project structure created! Run `code .` to open in VS Code.")
-    except Exception as e:
-        print(f"❌ An error occurred: {e}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Generate directory tree from input file.")
+    parser.add_argument("input_file", help="Path to the input file describing the directory structure.")
+    parser.add_argument("--strip-root", action="store_true", help="Use the first unindented line as the root directory.")
+    parser.add_argument("--dump-tree", action="store_true", help="Dump the parsed tree structure instead of creating the filesystem.")
 
+    args = parser.parse_args()
+    tree = parse_input_file(args.input_file, args.strip_root)
+
+    if args.dump_tree:
+        print("Parsed Tree Structure:")
+        print(tree)
+    else:
+        create_filesystem_from_tree(tree)
+        print("Directory tree generation complete.")
